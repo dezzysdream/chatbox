@@ -96,7 +96,7 @@ function Main() {
             store.settings.apiHost,
             prompts.nameConversation(session.messages.slice(0, 3)),
             (name) => {
-                name = name.replace(/['"“”]/g, '')
+                name = name.replace(/['"""]/g, '')
                 session.name = name
                 store.updateChatSession(session)
             },
@@ -423,10 +423,11 @@ function MessageInput(props: {
         if (event) {
             event.preventDefault()
         }
-        if (messageInput.length === 0) {
+        const trimmed = messageInput.trim()
+        if (trimmed.length === 0) {
             return
         }
-        props.onSubmit(createMessage('user', messageInput))
+        props.onSubmit(createMessage('user', trimmed))
         setMessageInput('')
     }
     return (

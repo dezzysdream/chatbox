@@ -153,6 +153,7 @@ function _Block(props: Props) {
                                     <Box
                                         sx={{
                                             // bgcolor: "Background",
+                                            whiteSpace: 'pre-wrap',
                                         }}
                                         dangerouslySetInnerHTML={{ __html: md.render(msg.content) }}
                                     />
