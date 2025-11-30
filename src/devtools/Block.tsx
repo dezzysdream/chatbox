@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef ,useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { ChatCompletionRequestMessage, ChatCompletionRequestMessageRoleEnum } from './openai-node';
 import Box from '@mui/material/Box';
 import Avatar from '@mui/material/Avatar';
@@ -59,6 +59,7 @@ export interface Props {
     refreshMsg: () => void
     copyMsg: () => void
     quoteMsg: () => void
+    addToast?: (message: string) => void
 }
 
 function _Block(props: Props) {
@@ -74,6 +75,96 @@ function _Block(props: Props) {
     const handleClose = () => {
         setAnchorEl(null);
     };
+
+    // Add copy buttons to code blocks
+    useEffect(() => {
+        // Find all code blocks in this message
+        // Use CSS.escape to handle IDs that start with numbers
+        const codeBlocks = document.querySelectorAll(`#${CSS.escape(props.id || '')} pre.hljs`);
+
+        codeBlocks.forEach((block) => {
+            const preElement = block as HTMLElement;
+
+            // Skip if button already exists
+            if (preElement.querySelector('.copy-code-button')) {
+                return;
+            }
+
+            // Make pre element position relative for absolute positioning of button
+            preElement.style.position = 'relative';
+
+            // Create copy button
+            const button = document.createElement('button');
+            button.textContent = 'Copy';
+            button.className = 'copy-code-button';
+            button.style.position = 'absolute';
+            button.style.top = '8px';
+            button.style.right = '8px';
+            button.style.padding = '4px 8px';
+            button.style.fontSize = '12px';
+            button.style.backgroundColor = '#f0f0f0';
+            button.style.border = '1px solid #ccc';
+            button.style.borderRadius = '4px';
+            button.style.cursor = 'pointer';
+            button.style.zIndex = '10';
+            button.style.transition = 'all 0.2s';
+
+            // Hover effects
+            button.onmouseenter = () => {
+                button.style.backgroundColor = '#e0e0e0';
+            };
+            button.onmouseleave = () => {
+                button.style.backgroundColor = '#f0f0f0';
+            };
+
+            // Click handler
+            button.onclick = async (e) => {
+                e.stopPropagation();
+
+                const codeElement = preElement.querySelector('code');
+                if (!codeElement) return;
+
+                const codeText = codeElement.textContent || '';
+
+                try {
+                    await navigator.clipboard.writeText(codeText);
+
+                    // Show feedback
+                    if (props.addToast) {
+                        props.addToast('Copied to clipboard');
+                    }
+
+                    // Change button text temporarily
+                    const originalText = button.textContent;
+                    button.textContent = 'Copied!';
+                    button.style.backgroundColor = '#4caf50';
+                    button.style.color = 'white';
+                    button.style.borderColor = '#4caf50';
+
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.style.backgroundColor = '#f0f0f0';
+                        button.style.color = 'black';
+                        button.style.borderColor = '#ccc';
+                    }, 2000);
+                } catch (err) {
+                    console.error('Failed to copy code:', err);
+                    if (props.addToast) {
+                        props.addToast('Failed to copy code');
+                    }
+                }
+            };
+
+            // Append button to code block
+            preElement.appendChild(button);
+        });
+
+        // Cleanup function to remove buttons
+        return () => {
+            const buttons = document.querySelectorAll(`#${CSS.escape(props.id || '')} .copy-code-button`);
+            buttons.forEach(btn => btn.remove());
+        };
+    }, [msg.content, props.id, props.addToast]);
 
 
     const tips: string[] = []
@@ -283,5 +374,5 @@ const StyledMenu = styled((props: MenuProps) => (
 export default function Block(props: Props) {
     return useMemo(() => {
         return <_Block {...props} />
-    }, [props.msg, props.showWordCount, props.showTokenCount])
+    }, [props.msg, props.showWordCount, props.showTokenCount, props.addToast])
 }

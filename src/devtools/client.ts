@@ -24,13 +24,30 @@ export async function replay(apiKey: string, host: string, msgs: Message[], onTe
     prompts = [head, ...prompts]
 
     try {
+        console.log('[client.replay] preparing request', {
+            apiHost: host,
+            promptCount: prompts.length,
+            headRole: head.role,
+        })
         const messages: ChatCompletionRequestMessage[] = prompts.map(msg => ({ role: msg.role, content: msg.content }))
+
+        // Detect if using OpenRouter
+        const isOpenRouter = host.includes('openrouter.ai')
+
+        const headers: Record<string, string> = {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+        }
+
+        // Add OpenRouter-specific headers
+        if (isOpenRouter) {
+            headers['HTTP-Referer'] = 'https://github.com/Bin-Huang/chatbox'
+            headers['X-Title'] = 'Chatbox'
+        }
+
         const response = await fetch(`${host}/v1/chat/completions`, {
             method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-            },
+            headers,
             body: JSON.stringify({
                 messages,
                 model: "gpt-3.5-turbo",
@@ -44,6 +61,7 @@ export async function replay(apiKey: string, host: string, msgs: Message[], onTe
         const d = new TextDecoder('utf8');
         let fullText = ''
         let partialData = '';
+        let chunkCount = 0
         while (true) {
             const { value, done } = await reader.read();
             if (done) {
@@ -78,6 +96,11 @@ export async function replay(apiKey: string, host: string, msgs: Message[], onTe
                     const text = data.choices[0]?.delta?.content
                     if (text !== undefined) {
                         fullText += text
+                        chunkCount += 1
+                        console.log('[client.replay] stream chunk', {
+                            chunkCount,
+                            deltaLength: text.length,
+                        })
                         if (onText) {
                             onText(fullText)
                         }
@@ -85,8 +108,10 @@ export async function replay(apiKey: string, host: string, msgs: Message[], onTe
                 }
             }
         }
+        console.log('[client.replay] stream completed', { chunkCount, totalLength: fullText.length })
         return fullText
     } catch (error) {
+        console.error('[client.replay] request failed', { error })
         if (onError) {
             onError(error)
         }

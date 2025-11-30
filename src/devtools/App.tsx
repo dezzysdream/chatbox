@@ -107,11 +107,24 @@ function Main() {
     }
 
     const generate = async (session: Session, promptMsgs: Message[], targetMsg: Message) => {
+        console.log('[generate] start', {
+            sessionId: session.id,
+            targetMsgId: targetMsg.id,
+            promptCount: promptMsgs.length,
+        })
+        let streamStarted = false
         await client.replay(
             store.settings.openaiKey,
             store.settings.apiHost,
             promptMsgs,
             (text) => {
+                if (!streamStarted) {
+                    streamStarted = true
+                    console.log('[generate] streaming response started', {
+                        sessionId: session.id,
+                        targetMsgId: targetMsg.id,
+                    })
+                }
                 for (let i = 0; i < session.messages.length; i++) {
                     if (session.messages[i].id === targetMsg.id) {
                         session.messages[i] = {
@@ -125,6 +138,11 @@ function Main() {
                 setScrollToMsg({ msgId: targetMsg.id, smooth: false })
             },
             (err) => {
+                console.error('[generate] OpenAI request failed', {
+                    sessionId: session.id,
+                    targetMsgId: targetMsg.id,
+                    error: err.message,
+                })
                 for (let i = 0; i < session.messages.length; i++) {
                     if (session.messages[i].id === targetMsg.id) {
                         session.messages[i] = {
@@ -137,6 +155,11 @@ function Main() {
                 store.updateChatSession(session)
             }
         )
+        console.log('[generate] completed', {
+            sessionId: session.id,
+            targetMsgId: targetMsg.id,
+            hadStream: streamStarted,
+        })
     }
 
     const [ messageInput, setMessageInput ] = useState('')
@@ -168,9 +191,14 @@ function Main() {
                             <IconButton edge="start" color="inherit" aria-label="menu" sx={{ mr: 2 }}>
                                 <ChatIcon />
                             </IconButton>
-                            <Typography variant="h5" color="inherit" component="div">
-                                ChatBox
-                            </Typography>
+                            <Box>
+                                <Typography variant="h5" color="inherit" component="div">
+                                    ChatBox
+                                </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    Prompt Lab
+                                </Typography>
+                            </Box>
                         </Toolbar>
 
                         <Divider />
@@ -336,6 +364,7 @@ function Main() {
                                             input += '\n\n-------------------\n\n'
                                             setMessageInput(input)
                                         }}
+                                        addToast={store.addToast}
                                     />
                                 ))
                             }
@@ -345,11 +374,24 @@ function Main() {
                                 messageInput={messageInput}
                                 setMessageInput={setMessageInput}
                                 onSubmit={async (newUserMsg: Message) => {
+                                    console.log('[ChatSession] User submission received', {
+                                        sessionId: store.currentSession.id,
+                                        messageId: newUserMsg.id,
+                                        excerpt: newUserMsg.content.slice(0, 60),
+                                    })
                                     const promptsMsgs = [...store.currentSession.messages, newUserMsg]
                                     const newAssistantMsg = createMessage('assistant', '....')
                                     store.currentSession.messages = [...store.currentSession.messages, newUserMsg, newAssistantMsg]
                                     store.updateChatSession(store.currentSession)
+                                    console.log('[ChatSession] Placeholder assistant created', {
+                                        placeholderId: newAssistantMsg.id,
+                                        promptCount: promptsMsgs.length,
+                                    })
                                     generate(store.currentSession, promptsMsgs, newAssistantMsg)
+                                    console.log('[ChatSession] generate invoked', {
+                                        sessionId: store.currentSession.id,
+                                        targetMsgId: newAssistantMsg.id,
+                                    })
                                     setScrollToMsg({ msgId: newAssistantMsg.id, smooth: true })
                                 }}
                             />
@@ -427,6 +469,7 @@ function MessageInput(props: {
         if (trimmed.length === 0) {
             return
         }
+        console.log('[MessageInput] Submitting prompt', { charCount: trimmed.length })
         props.onSubmit(createMessage('user', trimmed))
         setMessageInput('')
     }
@@ -455,7 +498,9 @@ function MessageInput(props: {
                         SEND
                     </Button>
                 </Stack>
-                <Typography variant='caption' style={{ opacity: 0.3 }}>[Enter] send, [Shift+Enter] line break</Typography>
+                <Typography variant='caption' style={{ opacity: 0.6 }}>
+                    Enter = Send • Shift+Enter = New Line • Esc clears pending input
+                </Typography>
             </Stack>
         </form>
     )
