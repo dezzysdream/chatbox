@@ -19,4 +19,34 @@ contextBridge.exposeInMainWorld('api', <ExposeInMainWindowAPI>{
 
         return () => ipcRenderer.off('native-theme-updated', callback);
     },
+
+    // Real-Time API WebSocket methods
+    realtime: {
+        connect: (apiKey: string, model: string) =>
+            ipcRenderer.invoke('realtime:connect', { apiKey, model }),
+
+        send: (connectionId: string, data: string) =>
+            ipcRenderer.invoke('realtime:send', { connectionId, data }),
+
+        close: (connectionId: string) =>
+            ipcRenderer.invoke('realtime:close', { connectionId }),
+
+        onMessage: (callback: (data: { connectionId: string; data: string }) => void) => {
+            const handler = (_event: any, data: any) => callback(data);
+            ipcRenderer.on('realtime:message', handler);
+            return () => ipcRenderer.off('realtime:message', handler);
+        },
+
+        onClose: (callback: (data: { connectionId: string; code: number; reason: string }) => void) => {
+            const handler = (_event: any, data: any) => callback(data);
+            ipcRenderer.on('realtime:close', handler);
+            return () => ipcRenderer.off('realtime:close', handler);
+        },
+
+        onError: (callback: (data: { connectionId: string; error: string }) => void) => {
+            const handler = (_event: any, data: any) => callback(data);
+            ipcRenderer.on('realtime:error', handler);
+            return () => ipcRenderer.off('realtime:error', handler);
+        },
+    },
 });
