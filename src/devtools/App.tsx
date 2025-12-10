@@ -22,6 +22,13 @@ import * as prompts from './prompts'
 import CleaningServicesIcon from '@mui/icons-material/CleaningServices';
 import CleanWidnow from './CleanWindow';
 import { ThemeSwitcherProvider } from './theme/ThemeSwitcher';
+import MicIcon from '@mui/icons-material/Mic';
+import CloseIcon from '@mui/icons-material/Close';
+import Dialog from '@mui/material/Dialog';
+import DialogTitle from '@mui/material/DialogTitle';
+import DialogContent from '@mui/material/DialogContent';
+import DialogActions from '@mui/material/DialogActions';
+import Paper from '@mui/material/Paper';
 
 const { useEffect, useState } = React
 
@@ -90,13 +97,14 @@ function Main() {
 
     const [sessionClean, setSessionClean] = React.useState<Session | null>(null);
 
+
     const generateName = async (session: Session) => {
         client.replay(
             store.settings.openaiKey,
             store.settings.apiHost,
             prompts.nameConversation(session.messages.slice(0, 3)),
             (name) => {
-                name = name.replace(/['"“”]/g, '')
+                name = name.replace(/['"""]/g, '')
                 session.name = name
                 store.updateChatSession(session)
             },
@@ -107,11 +115,24 @@ function Main() {
     }
 
     const generate = async (session: Session, promptMsgs: Message[], targetMsg: Message) => {
+        console.log('[generate] start', {
+            sessionId: session.id,
+            targetMsgId: targetMsg.id,
+            promptCount: promptMsgs.length,
+        })
+        let streamStarted = false
         await client.replay(
             store.settings.openaiKey,
             store.settings.apiHost,
             promptMsgs,
             (text) => {
+                if (!streamStarted) {
+                    streamStarted = true
+                    console.log('[generate] streaming response started', {
+                        sessionId: session.id,
+                        targetMsgId: targetMsg.id,
+                    })
+                }
                 for (let i = 0; i < session.messages.length; i++) {
                     if (session.messages[i].id === targetMsg.id) {
                         session.messages[i] = {
@@ -125,6 +146,11 @@ function Main() {
                 setScrollToMsg({ msgId: targetMsg.id, smooth: false })
             },
             (err) => {
+                console.error('[generate] OpenAI request failed', {
+                    sessionId: session.id,
+                    targetMsgId: targetMsg.id,
+                    error: err.message,
+                })
                 for (let i = 0; i < session.messages.length; i++) {
                     if (session.messages[i].id === targetMsg.id) {
                         session.messages[i] = {
@@ -137,6 +163,11 @@ function Main() {
                 store.updateChatSession(session)
             }
         )
+        console.log('[generate] completed', {
+            sessionId: session.id,
+            targetMsgId: targetMsg.id,
+            hadStream: streamStarted,
+        })
     }
 
     const [ messageInput, setMessageInput ] = useState('')
@@ -168,9 +199,14 @@ function Main() {
                             <IconButton edge="start" color="inherit" aria-label="menu" sx={{ mr: 2 }}>
                                 <ChatIcon />
                             </IconButton>
-                            <Typography variant="h5" color="inherit" component="div">
-                                ChatBox
-                            </Typography>
+                            <Box>
+                                <Typography variant="h5" color="inherit" component="div">
+                                    ChatBox
+                                </Typography>
+                                <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                    Prompt Lab
+                                </Typography>
+                            </Box>
                         </Toolbar>
 
                         <Divider />
@@ -336,6 +372,7 @@ function Main() {
                                             input += '\n\n-------------------\n\n'
                                             setMessageInput(input)
                                         }}
+                                        addToast={store.addToast}
                                     />
                                 ))
                             }
@@ -344,12 +381,26 @@ function Main() {
                             <MessageInput
                                 messageInput={messageInput}
                                 setMessageInput={setMessageInput}
+                                apiKey={store.settings.openaiKey}
                                 onSubmit={async (newUserMsg: Message) => {
+                                    console.log('[ChatSession] User submission received', {
+                                        sessionId: store.currentSession.id,
+                                        messageId: newUserMsg.id,
+                                        excerpt: newUserMsg.content.slice(0, 60),
+                                    })
                                     const promptsMsgs = [...store.currentSession.messages, newUserMsg]
                                     const newAssistantMsg = createMessage('assistant', '....')
                                     store.currentSession.messages = [...store.currentSession.messages, newUserMsg, newAssistantMsg]
                                     store.updateChatSession(store.currentSession)
+                                    console.log('[ChatSession] Placeholder assistant created', {
+                                        placeholderId: newAssistantMsg.id,
+                                        promptCount: promptsMsgs.length,
+                                    })
                                     generate(store.currentSession, promptsMsgs, newAssistantMsg)
+                                    console.log('[ChatSession] generate invoked', {
+                                        sessionId: store.currentSession.id,
+                                        targetMsgId: newAssistantMsg.id,
+                                    })
                                     setScrollToMsg({ msgId: newAssistantMsg.id, smooth: true })
                                 }}
                             />
@@ -417,22 +468,344 @@ function MessageInput(props: {
     onSubmit: (newMsg: Message) => void
     messageInput: string
     setMessageInput: (value: string) => void
+    apiKey: string
 }) {
     const {messageInput, setMessageInput} = props
+    const [isRecording, setIsRecording] = useState(false)
+    const [micStream, setMicStream] = useState<MediaStream | null>(null)
+    const [audioLevel, setAudioLevel] = useState(0)
+    const [connectionId, setConnectionId] = useState<string | null>(null)
+    const [voiceModalOpen, setVoiceModalOpen] = useState(false)
+    const [transcripts, setTranscripts] = useState<Array<{role: 'user' | 'assistant', text: string}>>([])
+    const [currentTranscript, setCurrentTranscript] = useState('')
+    const audioContextRef = React.useRef<AudioContext | null>(null)
+    const analyserRef = React.useRef<AnalyserNode | null>(null)
+    const animationRef = React.useRef<number | null>(null)
+    const processorRef = React.useRef<ScriptProcessorNode | null>(null)
+    const messageCleanupRef = React.useRef<(() => void) | null>(null)
+    const playbackContextRef = React.useRef<AudioContext | null>(null)
+    const audioQueueRef = React.useRef<Int16Array[]>([])
+    const isPlayingRef = React.useRef(false)
+
+    // Helper function to play queued audio
+    const playNextAudio = React.useCallback(() => {
+        if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+
+        const ctx = playbackContextRef.current;
+        if (!ctx) return;
+
+        isPlayingRef.current = true;
+        const pcm16 = audioQueueRef.current.shift()!;
+
+        // Convert Int16 to Float32
+        const float32 = new Float32Array(pcm16.length);
+        for (let i = 0; i < pcm16.length; i++) {
+            float32[i] = pcm16[i] / 32768;
+        }
+
+        const buffer = ctx.createBuffer(1, float32.length, 24000);
+        buffer.getChannelData(0).set(float32);
+
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(ctx.destination);
+        source.onended = () => {
+            isPlayingRef.current = false;
+            playNextAudio(); // Play next chunk
+        };
+        source.start();
+    }, []);
+
     const submit = (event?: any) => {
         if (event) {
             event.preventDefault()
         }
-        if (messageInput.length === 0) {
+        const trimmed = messageInput.trim()
+        if (trimmed.length === 0) {
             return
         }
-        props.onSubmit(createMessage('user', messageInput))
+        console.log('[MessageInput] Submitting prompt', { charCount: trimmed.length })
+        props.onSubmit(createMessage('user', trimmed))
         setMessageInput('')
     }
     return (
         <form onSubmit={submit}>
             <Stack direction="column" spacing={1}>
                 <Stack direction="row" spacing={1} alignItems="center">
+                    <IconButton
+                        color="primary"
+                        onClick={() => {
+                            setVoiceModalOpen(true);
+                            setTranscripts([]);
+                            setCurrentTranscript('');
+                        }}
+                    >
+                        <MicIcon />
+                    </IconButton>
+
+                    {/* Voice Chat Modal */}
+                    <Dialog
+                        open={voiceModalOpen}
+                        onClose={() => {}}
+                        maxWidth="sm"
+                        fullWidth
+                        PaperProps={{ sx: { minHeight: 400 } }}
+                    >
+                        <DialogTitle>
+                            <Box display="flex" alignItems="center" justifyContent="space-between">
+                                <Typography variant="h6">Voice Chat</Typography>
+                                <Box display="flex" alignItems="center" gap={1}>
+                                    {isRecording && (
+                                        <Box
+                                            sx={{
+                                                width: 60,
+                                                height: 8,
+                                                bgcolor: 'grey.300',
+                                                borderRadius: 1,
+                                                overflow: 'hidden',
+                                            }}
+                                        >
+                                            <Box
+                                                sx={{
+                                                    width: `${audioLevel * 100}%`,
+                                                    height: '100%',
+                                                    bgcolor: audioLevel > 0.5 ? 'error.main' : 'success.main',
+                                                    transition: 'width 0.05s',
+                                                }}
+                                            />
+                                        </Box>
+                                    )}
+                                </Box>
+                            </Box>
+                        </DialogTitle>
+                        <DialogContent>
+                            <Box sx={{ minHeight: 200, maxHeight: 300, overflow: 'auto' }}>
+                                {transcripts.map((t, i) => (
+                                    <Paper
+                                        key={i}
+                                        sx={{
+                                            p: 1.5,
+                                            mb: 1,
+                                            bgcolor: t.role === 'user' ? 'primary.dark' : 'background.paper',
+                                            color: t.role === 'user' ? 'primary.contrastText' : 'text.primary',
+                                        }}
+                                    >
+                                        <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                            {t.role === 'user' ? 'You' : 'Assistant'}
+                                        </Typography>
+                                        <Typography variant="body2">{t.text}</Typography>
+                                    </Paper>
+                                ))}
+                                {currentTranscript && (
+                                    <Paper sx={{ p: 1.5, mb: 1, bgcolor: 'background.paper' }}>
+                                        <Typography variant="caption" sx={{ opacity: 0.7 }}>
+                                            Assistant
+                                        </Typography>
+                                        <Typography variant="body2" sx={{ fontStyle: 'italic' }}>
+                                            {currentTranscript}
+                                        </Typography>
+                                    </Paper>
+                                )}
+                                {transcripts.length === 0 && !currentTranscript && (
+                                    <Typography color="text.secondary" textAlign="center" sx={{ mt: 4 }}>
+                                        {isRecording ? 'Listening... speak now!' : 'Click Start to begin voice chat'}
+                                    </Typography>
+                                )}
+                            </Box>
+                        </DialogContent>
+                        <DialogActions sx={{ justifyContent: 'center', pb: 2 }}>
+                            {!isRecording ? (
+                                <Button
+                                    variant="contained"
+                                    color="primary"
+                                    startIcon={<MicIcon />}
+                                    onClick={async () => {
+                                        // Start recording logic
+                                        console.log('[VoiceModal] Starting recording...');
+                                        try {
+                                            // First, connect to OpenAI Realtime API
+                                            const result = await window.api.realtime.connect(
+                                                props.apiKey,
+                                                'gpt-4o-realtime-preview-2024-12-17'
+                                            );
+                                            console.log('[VoiceModal] WebSocket connected!', result);
+                                            setConnectionId(result.connectionId);
+
+                                            // Initialize playback context
+                                            playbackContextRef.current = new AudioContext({ sampleRate: 24000 });
+
+                                            // Set up message listener
+                                            const cleanup = window.api.realtime.onMessage((data) => {
+                                                try {
+                                                    const event = JSON.parse(data.data);
+                                                    if (event.type === 'response.audio.delta') {
+                                                        const binaryString = atob(event.delta);
+                                                        const bytes = new Uint8Array(binaryString.length);
+                                                        for (let i = 0; i < binaryString.length; i++) {
+                                                            bytes[i] = binaryString.charCodeAt(i);
+                                                        }
+                                                        const pcm16 = new Int16Array(bytes.buffer);
+                                                        audioQueueRef.current.push(pcm16);
+                                                        playNextAudio();
+                                                    } else if (event.type === 'response.audio_transcript.delta') {
+                                                        setCurrentTranscript(prev => prev + event.delta);
+                                                    } else if (event.type === 'response.audio_transcript.done') {
+                                                        setTranscripts(prev => [...prev, { role: 'assistant', text: event.transcript }]);
+                                                        setCurrentTranscript('');
+                                                    } else if (event.type === 'conversation.item.input_audio_transcription.completed') {
+                                                        setTranscripts(prev => [...prev, { role: 'user', text: event.transcript }]);
+                                                    } else if (event.type === 'error') {
+                                                        console.error('[VoiceModal] API Error:', event.error);
+                                                    }
+                                                } catch (e) {
+                                                    console.error('[VoiceModal] Failed to parse message:', e);
+                                                }
+                                            });
+                                            messageCleanupRef.current = cleanup;
+
+                                            // Configure session
+                                            const sessionConfig = {
+                                                type: 'session.update',
+                                                session: {
+                                                    modalities: ['text', 'audio'],
+                                                    instructions: 'You are a helpful assistant. Respond concisely.',
+                                                    voice: 'alloy',
+                                                    input_audio_format: 'pcm16',
+                                                    output_audio_format: 'pcm16',
+                                                    input_audio_transcription: { model: 'whisper-1' },
+                                                    turn_detection: {
+                                                        type: 'server_vad',
+                                                        threshold: 0.5,
+                                                        prefix_padding_ms: 300,
+                                                        silence_duration_ms: 500,
+                                                    },
+                                                },
+                                            };
+                                            window.api.realtime.send(result.connectionId, JSON.stringify(sessionConfig));
+
+                                            // Get microphone
+                                            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                                            setMicStream(stream);
+                                            setIsRecording(true);
+
+                                            // Set up audio context
+                                            const audioContext = new AudioContext({ sampleRate: 24000 });
+                                            audioContextRef.current = audioContext;
+                                            const source = audioContext.createMediaStreamSource(stream);
+
+                                            // Analyser for level
+                                            const analyser = audioContext.createAnalyser();
+                                            analyser.fftSize = 256;
+                                            source.connect(analyser);
+                                            analyserRef.current = analyser;
+
+                                            // Processor to send audio
+                                            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+                                            processorRef.current = processor;
+                                            const connId = result.connectionId;
+
+                                            processor.onaudioprocess = (e) => {
+                                                const inputData = e.inputBuffer.getChannelData(0);
+                                                const pcm16 = new Int16Array(inputData.length);
+                                                for (let i = 0; i < inputData.length; i++) {
+                                                    const s = Math.max(-1, Math.min(1, inputData[i]));
+                                                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+                                                }
+                                                const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
+                                                window.api.realtime.send(connId, JSON.stringify({
+                                                    type: 'input_audio_buffer.append',
+                                                    audio: base64,
+                                                }));
+                                            };
+
+                                            source.connect(processor);
+                                            processor.connect(audioContext.destination);
+
+                                            // Level monitoring
+                                            const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                                            const updateLevel = () => {
+                                                analyser.getByteFrequencyData(dataArray);
+                                                const average = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+                                                setAudioLevel(average / 255);
+                                                animationRef.current = requestAnimationFrame(updateLevel);
+                                            };
+                                            updateLevel();
+                                        } catch (err: any) {
+                                            console.error('[VoiceModal] Error:', err);
+                                        }
+                                    }}
+                                >
+                                    Start
+                                </Button>
+                            ) : (
+                                <Button
+                                    variant="contained"
+                                    color="error"
+                                    onClick={() => {
+                                        // Stop recording
+                                        console.log('[VoiceModal] Stopping...');
+                                        if (animationRef.current) {
+                                            cancelAnimationFrame(animationRef.current);
+                                            animationRef.current = null;
+                                        }
+                                        if (processorRef.current) {
+                                            processorRef.current.disconnect();
+                                            processorRef.current = null;
+                                        }
+                                        if (audioContextRef.current) {
+                                            audioContextRef.current.close();
+                                            audioContextRef.current = null;
+                                        }
+                                        if (micStream) {
+                                            micStream.getTracks().forEach(track => track.stop());
+                                            setMicStream(null);
+                                        }
+                                        if (messageCleanupRef.current) {
+                                            messageCleanupRef.current();
+                                            messageCleanupRef.current = null;
+                                        }
+                                        audioQueueRef.current = [];
+                                        isPlayingRef.current = false;
+                                        if (playbackContextRef.current) {
+                                            playbackContextRef.current.close();
+                                            playbackContextRef.current = null;
+                                        }
+                                        if (connectionId) {
+                                            window.api.realtime.close(connectionId);
+                                            setConnectionId(null);
+                                        }
+                                        setAudioLevel(0);
+                                        setIsRecording(false);
+                                    }}
+                                >
+                                    Stop
+                                </Button>
+                            )}
+                            <Button
+                                variant="outlined"
+                                onClick={() => {
+                                    // Close modal and cleanup
+                                    if (isRecording) {
+                                        // Stop first
+                                        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+                                        if (processorRef.current) processorRef.current.disconnect();
+                                        if (audioContextRef.current) audioContextRef.current.close();
+                                        if (micStream) micStream.getTracks().forEach(track => track.stop());
+                                        if (messageCleanupRef.current) messageCleanupRef.current();
+                                        if (playbackContextRef.current) playbackContextRef.current.close();
+                                        if (connectionId) window.api.realtime.close(connectionId);
+                                        setIsRecording(false);
+                                        setMicStream(null);
+                                        setConnectionId(null);
+                                    }
+                                    setVoiceModalOpen(false);
+                                }}
+                            >
+                                Close
+                            </Button>
+                        </DialogActions>
+                    </Dialog>
+
                     <TextField
                         multiline
                         label="Prompt"
@@ -454,7 +827,9 @@ function MessageInput(props: {
                         SEND
                     </Button>
                 </Stack>
-                <Typography variant='caption' style={{ opacity: 0.3 }}>[Enter] send, [Shift+Enter] line break</Typography>
+                <Typography variant='caption' style={{ opacity: 0.6 }}>
+                    Enter = Send • Shift+Enter = New Line
+                </Typography>
             </Stack>
         </form>
     )

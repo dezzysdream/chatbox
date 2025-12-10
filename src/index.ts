@@ -18,10 +18,31 @@ const onReady = (): void => {
         callback({
             responseHeaders: {
                 ...details.responseHeaders,
-                //   'Content-Security-Policy': ['default-src \'none\'']
-                'Content-Security-Policy': ['*'], // 为了支持代理
+                // Allow all sources for dev/proxy support, including WebSocket and media
+                'Content-Security-Policy': [
+                    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+                    "connect-src * wss: ws:; " +
+                    "media-src * blob:; " +
+                    "script-src * 'unsafe-inline' 'unsafe-eval';"
+                ],
             },
         });
+    });
+
+    // Handle permission requests for microphone
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        const allowedPermissions = ['media', 'microphone', 'audio'];
+        if (allowedPermissions.includes(permission)) {
+            callback(true);
+        } else {
+            callback(false);
+        }
+    });
+
+    // Handle permission check requests
+    session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
+        const allowedPermissions = ['media', 'microphone', 'audio'];
+        return allowedPermissions.includes(permission);
     });
 
     // Create the browser window.
@@ -104,5 +125,89 @@ updateElectronApp({
 // theme
 
 ipcMain.handle('shouldUseDarkColors', () => nativeTheme.shouldUseDarkColors);
+
+// Real-Time API WebSocket handling
+// We use the main process because it can set proper HTTP headers for WebSocket
+import WebSocket from 'ws';
+
+const realtimeConnections = new Map<string, WebSocket>();
+let connectionIdCounter = 0;
+
+ipcMain.handle('realtime:connect', async (event, { apiKey, model }) => {
+    const connectionId = `realtime-${++connectionIdCounter}`;
+    const url = `wss://api.openai.com/v1/realtime?model=${model}`;
+
+    return new Promise((resolve, reject) => {
+        try {
+            const ws = new WebSocket(url, {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'OpenAI-Beta': 'realtime=v1',
+                },
+            });
+
+            const timeout = setTimeout(() => {
+                ws.close();
+                reject(new Error('Connection timeout'));
+            }, 15000);
+
+            ws.on('open', () => {
+                clearTimeout(timeout);
+                realtimeConnections.set(connectionId, ws);
+                resolve({ connectionId, success: true });
+            });
+
+            ws.on('message', (data) => {
+                // Send message to renderer
+                event.sender.send('realtime:message', {
+                    connectionId,
+                    data: data.toString(),
+                });
+            });
+
+            ws.on('close', (code, reason) => {
+                clearTimeout(timeout);
+                realtimeConnections.delete(connectionId);
+                event.sender.send('realtime:close', {
+                    connectionId,
+                    code,
+                    reason: reason.toString(),
+                });
+            });
+
+            ws.on('error', (error) => {
+                clearTimeout(timeout);
+                debug('WebSocket error:', error.message);
+                event.sender.send('realtime:error', {
+                    connectionId,
+                    error: error.message,
+                });
+                if (!realtimeConnections.has(connectionId)) {
+                    reject(new Error(error.message));
+                }
+            });
+        } catch (error) {
+            reject(error);
+        }
+    });
+});
+
+ipcMain.handle('realtime:send', (event, { connectionId, data }) => {
+    const ws = realtimeConnections.get(connectionId);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(data);
+        return true;
+    }
+    return false;
+});
+
+ipcMain.handle('realtime:close', (event, { connectionId }) => {
+    const ws = realtimeConnections.get(connectionId);
+    if (ws) {
+        ws.close();
+        realtimeConnections.delete(connectionId);
+    }
+    return true;
+});
 
 // updateElectronApp()
